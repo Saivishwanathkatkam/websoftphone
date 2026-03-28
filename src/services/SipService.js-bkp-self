@@ -1,0 +1,167 @@
+import JsSIP from 'jssip';
+
+JsSIP.debug.enable('JsSIP:*');
+console.log('SipService Version 1.1 Loaded');
+
+class SipService {
+    constructor() {
+        this.ua = null;
+        this.session = null;
+        this.callbacks = {
+            onRegistered: () => { },
+            onUnregistered: () => { },
+            onRegistrationFailed: () => { },
+            onNewCall: () => { },
+            onCallEnded: () => { },
+            onCallConfirmed: () => { },
+            onCallFailed: () => { },
+        };
+    }
+
+    setCallbacks(callbacks) {
+        this.callbacks = { ...this.callbacks, ...callbacks };
+    }
+
+    start(config) {
+        const { host, port, user, password, displayName } = config;
+        const socket = new JsSIP.WebSocketInterface(`ws://${host}:${port}`);
+
+        const configuration = {
+            sockets: [socket],
+            uri: `sip:${user}@${host}`,
+            password: password,
+            display_name: displayName || user,
+            session_timers_expires: 600, // Correct key for JsSIP UA config
+        };
+
+        try {
+            this.ua = new JsSIP.UA(configuration);
+
+            this.ua.on('registered', () => {
+                console.log('SIP Registered');
+                this.callbacks.onRegistered();
+            });
+
+            this.ua.on('unregistered', () => {
+                console.log('SIP Unregistered');
+                this.callbacks.onUnregistered();
+            });
+
+	    this.ua.on('connecting', () => {
+		console.log('Transport connecting');
+	    });
+
+	    this.ua.on('connected', () => {
+		console.log('Transport connected');
+	    });
+
+	    this.ua.on('disconnected', () => {
+	        console.log('Transport disconnected');
+	    });
+
+	    this.ua.on('failed', () => {
+		console.error('Transport connection failed');
+	    });
+
+            this.ua.on('registrationFailed', (e) => {
+                console.error('SIP Registration Failed:', e.cause);
+                this.callbacks.onRegistrationFailed(e.cause);
+            });
+
+            this.ua.on('newRTCSession', (data) => {
+                console.log('New RTC Session');
+                const session = data.session;
+
+                if (session.direction === 'incoming') {
+                    console.log('Incoming call');
+                    this.session = session;
+                    this.callbacks.onNewCall(session);
+                }
+
+                session.on('confirmed', () => {
+                    console.log('Call confirmed');
+                    this.callbacks.onCallConfirmed();
+                });
+
+                session.on('ended', () => {
+                    console.log('Call ended');
+                    this.session = null;
+                    this.callbacks.onCallEnded();
+                });
+
+                session.on('failed', (e) => {
+                    console.error('Call failed:', e.cause);
+                    this.session = null;
+                    this.callbacks.onCallFailed(e.cause);
+                });
+
+            });
+
+            this.ua.start();
+        } catch (err) {
+            console.error('Error starting SIP UA:', err);
+        }
+    }
+
+    stop() {
+        if (this.ua) {
+            this.ua.stop();
+        }
+    }
+
+    makeCall(target) {
+        if (!this.ua) return;
+
+        const options = {
+            mediaConstraints: { audio: true, video: false },
+            sessionTimersExpires: 600,
+            pcConfig: {
+                iceServers: [{ urls: ['stun:stun.l.google.com:19302'] }]
+            }
+        };
+
+        this.session = this.ua.call(`sip:${target}@${this.ua.configuration.uri.host}`, options);
+
+        this.session.on('confirmed', () => {
+            this.callbacks.onCallConfirmed();
+        });
+
+        this.session.on('ended', () => {
+            this.callbacks.onCallEnded();
+        });
+
+        this.session.on('failed', (e) => {
+            this.callbacks.onCallFailed(e.cause);
+        });
+
+
+        return this.session;
+    }
+
+    terminateCall() {
+        if (this.session) {
+            try {
+                this.session.terminate();
+            } catch (e) {
+                console.error("Error terminating session", e);
+            }
+            this.session = null;
+            this.callbacks.onCallEnded(); // Force UI reset
+        }
+    }
+
+    answerCall() {
+        if (this.session && this.session.direction === 'incoming') {
+            this.session.answer({
+                mediaConstraints: { audio: true, video: false },
+                sessionTimersExpires: 600,
+                pcConfig: {
+                    iceServers: [{ urls: ['stun:stun.l.google.com:19302'] }]
+                }
+            });
+        }
+    }
+}
+
+const sipService = new SipService();
+export default sipService;
