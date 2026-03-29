@@ -69,21 +69,6 @@ npm run dev
 
 ---
 
-## Configuration
-
-Create a `.env` file in the project root with your SIP server details:
-
-```env
-VITE_SIP_HOST=your.sip.server
-VITE_SIP_PORT=5060
-VITE_SIP_USER=your_sip_username
-VITE_SIP_PASSWORD=your_sip_password
-```
-
-> These values map to the `host` and `port` used in the WebSocket interface and UA configuration. See [Technical Details](#technical-details) for how they are consumed.
-
----
-
 ## Browser Support
 
 | Browser | Supported |
