@@ -62,6 +62,22 @@ const TransferIcon = () => (
   </svg>
 );
 
+const BlindIcon = () => (
+  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+    <line x1="5" y1="12" x2="19" y2="12" />
+    <polyline points="12 5 19 12 12 19" />
+  </svg>
+);
+
+const WarmIcon = () => (
+  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+    <path d="M17 1l4 4-4 4" />
+    <path d="M3 11V9a4 4 0 0 1 4-4h14" />
+    <path d="M7 23l-4-4 4-4" />
+    <path d="M21 13v2a4 4 0 0 1-4 4H3" />
+  </svg>
+);
+
 const KeypadIcon = () => (
   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
     <rect x="4" y="4" width="4" height="4" rx="1.5" />
@@ -88,15 +104,13 @@ function App() {
   const [dest, setDest] = useState('1003');
   const [isRegistered, setIsRegistered] = useState(false);
   const [status, setStatus] = useState('Disconnected');
-  const [callStatus, setCallStatus] = useState('Idle');
-  const [isIncoming, setIsIncoming] = useState(false);
-  const [duration, setDuration] = useState(0);
-  const [isMuted, setIsMuted] = useState(false);
-  const [isHeld, setIsHeld] = useState(false);
+  const [sessions, setSessions] = useState({}); // { sessionId: { status, duration, ... } }
+  const [activeSessionId, setActiveSessionId] = useState(null);
   const [isTransferring, setIsTransferring] = useState(false);
   const [transferTarget, setTransferTarget] = useState('');
+
   const audioRef = useRef(null);
-  const timerRef = useRef(null);
+  const timersRef = useRef({}); // { sessionId: intervalId }
 
   useEffect(() => {
     sipService.setCallbacks({
@@ -113,57 +127,137 @@ function App() {
         setStatus(`Failed: ${cause}`);
       },
       onNewCall: (session) => {
-        setCallStatus('Inbound Call...');
-        setIsIncoming(true);
+        const id = session.id;
+        const number = session.remote_identity.uri.user;
+        setSessions(prev => {
+          const newSessions = {
+            ...prev,
+            [id]: {
+              id,
+              session,
+              status: 'Ringing...',
+              isIncoming: true,
+              isAnswered: false,
+              number,
+              duration: 0,
+              isMuted: false,
+              isHeld: false,
+              stream: null
+            }
+          };
+
+          setActiveSessionId(prevId => {
+            if (!prevId) return id;
+            return prevId;
+          });
+
+          return newSessions;
+        });
       },
-      onCallEnded: () => {
-        setCallStatus('Idle');
-        setIsIncoming(false);
-        setIsMuted(false);
-        setIsHeld(false);
-        setIsTransferring(false);
-        setTransferTarget('');
-        stopTimer();
+      onCallConfirmed: (session) => {
+        const id = session.id;
+        setSessions(prev => {
+          if (!prev[id]) return prev;
+          return {
+            ...prev,
+            [id]: { ...prev[id], status: 'In Call', isAnswered: true }
+          };
+        });
+        startTimer(id);
       },
-      onCallConfirmed: () => {
-        setCallStatus('In Call');
-        startTimer();
+      onCallEnded: (session) => {
+        const id = session.id;
+        stopTimer(id);
+        setSessions(prev => {
+          const newSessions = { ...prev };
+          delete newSessions[id];
+
+          setActiveSessionId(prevId => {
+            if (prevId !== id) return prevId;
+            const remainingIds = Object.keys(newSessions);
+            return remainingIds.length > 0 ? remainingIds[0] : null;
+          });
+
+          return newSessions;
+        });
       },
-      onCallFailed: (cause) => {
-        setCallStatus(`Failed: ${cause}`);
-        setIsIncoming(false);
-        setIsMuted(false);
-        setIsHeld(false);
-        setIsTransferring(false);
-        setTransferTarget('');
-        stopTimer();
-        setTimeout(() => setCallStatus('Idle'), 3000);
+      onCallFailed: (session, cause) => {
+        const id = session.id;
+        stopTimer(id);
+        setSessions(prev => {
+          if (!prev[id]) return prev;
+          return {
+            ...prev,
+            [id]: { ...prev[id], status: `Failed: ${cause}` }
+          };
+        });
+        setTimeout(() => {
+          setSessions(prev => {
+            const newSessions = { ...prev };
+            if (newSessions[id] && newSessions[id].status.includes('Failed')) {
+              delete newSessions[id];
+            }
+            return newSessions;
+          });
+          setActiveSessionId(prev => {
+            if (prev !== id) return prev;
+            // Access state inside functional update for accuracy if needed, 
+            // but sessions are already deleted or will be deleted.
+            return null; // For failed calls, staying at null is fine unless we want to find another
+          });
+        }, 3000);
       },
-      onRemoteStream: (stream) => {
-        if (audioRef.current) {
-          audioRef.current.srcObject = stream;
-          audioRef.current.play().catch(e => console.error("Error playing audio", e));
-        }
+      onRemoteStream: (session, stream) => {
+        const id = session.id;
+        setSessions(prev => {
+          if (!prev[id]) return prev;
+          const updatedSession = { ...prev[id], stream: stream };
+
+          setActiveSessionId(prevId => {
+            if (prevId === id && audioRef.current) {
+              audioRef.current.srcObject = stream;
+              audioRef.current.play().catch(e => console.error("Error playing audio", e));
+            }
+            return prevId;
+          });
+
+          return { ...prev, [id]: updatedSession };
+        });
       }
     });
 
     return () => {
       sipService.stop();
-      stopTimer();
+      Object.keys(timersRef.current).forEach(id => clearInterval(timersRef.current[id]));
     };
   }, []);
 
-  const startTimer = () => {
-    setDuration(0);
-    timerRef.current = setInterval(() => {
-      setDuration(prev => prev + 1);
+  useEffect(() => {
+    if (activeSessionId && sessions[activeSessionId] && sessions[activeSessionId].stream) {
+      if (audioRef.current) {
+        audioRef.current.srcObject = sessions[activeSessionId].stream;
+        audioRef.current.play().catch(e => console.error("Error playing audio", e));
+      }
+    }
+  }, [activeSessionId, sessions]);
+
+  const startTimer = (id) => {
+    if (timersRef.current[id]) clearInterval(timersRef.current[id]);
+    timersRef.current[id] = setInterval(() => {
+      setSessions(prev => {
+        if (!prev[id]) return prev;
+        return {
+          ...prev,
+          [id]: { ...prev[id], duration: prev[id].duration + 1 }
+        };
+      });
     }, 1000);
   };
 
-  const stopTimer = () => {
-    if (timerRef.current) {
-      clearInterval(timerRef.current);
-      timerRef.current = null;
+  const stopTimer = (id) => {
+    if (timersRef.current[id]) {
+      clearInterval(timersRef.current[id]);
+      delete timersRef.current[id];
     }
   };
 
@@ -184,46 +278,73 @@ function App() {
 
   const handleCall = () => {
     if (!dest) return;
-    setCallStatus('Calling...');
-    sipService.makeCall(dest);
+    const session = sipService.makeCall(dest);
+    const id = session.id;
+    setSessions(prev => ({
+      ...prev,
+      [id]: {
+        id,
+        session,
+        status: 'Calling...',
+        isIncoming: false,
+        isAnswered: false,
+        number: dest,
+        duration: 0,
+        isMuted: false,
+        isHeld: false,
+        stream: null
+      }
+    }));
+    setActiveSessionId(id);
+    setDest('');
   };
 
-  const handleHangup = () => {
-    sipService.terminateCall();
-    setCallStatus('Idle');
+  const handleHangup = (id) => {
+    const sessionData = sessions[id || activeSessionId];
+    if (sessionData) {
+      sipService.terminateCall(sessionData.session);
+    }
   };
 
-  const handleAnswer = () => {
-    sipService.answerCall();
-    setCallStatus('In Call');
-    setIsIncoming(false);
+  const handleAnswer = (id) => {
+    const sessionData = sessions[id || activeSessionId];
+    if (sessionData) {
+      sipService.answerCall(sessionData.session);
+    }
   };
 
-  const handleHold = () => {
-    sipService.holdCall();
+  const handleDecline = (id) => {
+    const sessionData = sessions[id || activeSessionId];
+    if (sessionData) {
+      sipService.terminateCall(sessionData.session);
+    }
   };
 
-  const handleunhold = () => {
-    sipService.unholdCall();
+  const handleToggleHold = (id) => {
+    const sid = id || activeSessionId;
+    const sessionData = sessions[sid];
+    if (sessionData) {
+      if (sessionData.isHeld) {
+        sipService.unholdCall(sessionData.session);
+        setSessions(prev => ({ ...prev, [sid]: { ...prev[sid], isHeld: false } }));
+      } else {
+        sipService.holdCall(sessionData.session);
+        setSessions(prev => ({ ...prev, [sid]: { ...prev[sid], isHeld: true } }));
+      }
+    }
   };
 
-  const handlemute = () => {
-    sipService.muteCall();
-    setIsMuted(true);
-  };
-
-  const handleunmute = () => {
-    sipService.unmuteCall();
-    setIsMuted(false);
-  };
-
-  const handleToggleHold = () => {
-    if (isHeld) {
-      sipService.unholdCall();
-      setIsHeld(false);
-    } else {
-      sipService.holdCall();
-      setIsHeld(true);
+  const handleToggleMute = (id) => {
+    const sid = id || activeSessionId;
+    const sessionData = sessions[sid];
+    if (sessionData) {
+      if (sessionData.isMuted) {
+        sipService.unmuteCall(sessionData.session);
+        setSessions(prev => ({ ...prev, [sid]: { ...prev[sid], isMuted: false } }));
+      } else {
+        sipService.muteCall(sessionData.session);
+        setSessions(prev => ({ ...prev, [sid]: { ...prev[sid], isMuted: true } }));
+      }
     }
   };
 
@@ -234,9 +355,23 @@ function App() {
 
   const handleTransferConfirm = () => {
     if (!transferTarget) return;
-    sipService.transferCall(transferTarget);
+    const sessionData = sessions[activeSessionId];
+    if (sessionData) {
+      sipService.transferCall(sessionData.session, transferTarget);
+    }
     setIsTransferring(false);
   };
+
+  const handleAttendTransfer = () => {
+    // Requires exactly two sessions
+    const sessionIds = Object.keys(sessions);
+    if (sessionIds.length === 2) {
+      const active = sessions[activeSessionId];
+      const otherId = sessionIds.find(id => id !== activeSessionId);
+      const other = sessions[otherId];
+      sipService.attendedTransfer(other.session, active.session);
+    }
+  }
 
   const handleCancelTransfer = () => {
     setIsTransferring(false);
@@ -257,6 +392,10 @@ function App() {
     { n: '7', l: 'PQRS' }, { n: '8', l: 'TUV' }, { n: '9', l: 'WXYZ' },
     { n: '*', l: '' }, { n: '0', l: '+' }, { n: '#', l: '' }
   ];
+
+  const activeSession = sessions[activeSessionId];
+  const sessionCount = Object.keys(sessions).length;
+  const otherSessionId = Object.keys(sessions).find(id => id !== activeSessionId);
 
   return (
     <div className="app-container">
@@ -311,14 +450,24 @@ function App() {
 
             <div className="active-calls-list">
               <div className="section-title" style={{ fontSize: '14px', opacity: 0.7 }}>Recent Activity</div>
-              {callStatus !== 'Idle' ? (
-                <div className="call-item">
-                  <div className="item-avatar">{dest[0] || '?'}</div>
-                  <div className="item-details">
-                    <div className="item-name">{dest}</div>
-                    <div className="item-status">{callStatus}</div>
+              {sessionCount > 0 ? (
+                Object.values(sessions).map(s => (
+                  <div
+                    key={s.id}
+                    className={`call-item ${s.id === activeSessionId ? 'active' : ''}`}
+                    onClick={() => setActiveSessionId(s.id)}
+                    style={{ cursor: 'pointer' }}
+                  >
+                    <div className="item-avatar">{s.number?.charAt(0) || '?'}</div>
+                    <div className="item-details">
+                      <div className="item-name">{s.number}</div>
+                      <div className="item-status">
+                        <span className={`status-dot ${s.isAnswered ? 'in-call' : (s.isIncoming ? 'ringing' : '')}`}></span>
+                        {s.status} {s.isHeld ? '(Held)' : ''}
+                      </div>
+                    </div>
                   </div>
-                </div>
+                ))
               ) : (
                 <div style={{ padding: '20px', textAlign: 'center', background: 'var(--surface-alt)', borderRadius: '12px', color: 'var(--text-muted)', fontSize: '13px' }}>
                   No active calls at the moment
@@ -344,18 +493,15 @@ function App() {
                   ))}
                 </div>
 
-                {callStatus === 'Idle' ? (
-                  <button className="btn btn-call-large" onClick={handleCall}>
-                    <PhoneIcon /> Start Call
+                <div style={{ display: 'flex', gap: '12px' }}>
+                  <button
+                    className="btn btn-call-large"
+                    onClick={handleCall}
+                    disabled={sessionCount >= 2}
+                  >
+                    <PhoneIcon /> {sessionCount > 0 ? 'Add Call' : 'Start Call'}
                   </button>
-                ) : (
-                  <div style={{ display: 'flex', gap: '12px' }}>
-                    {isIncoming && (
-                      <button className="btn btn-primary" style={{ background: 'var(--primary)' }} onClick={handleAnswer}>Answer</button>
-                    )}
-                    <button className="btn btn-primary" style={{ background: 'var(--danger)' }} onClick={handleHangup}>Hangup</button>
-                  </div>
-                )}
+                </div>
               </div>
             ) : (
               <div className="transfer-panel animate-in">
@@ -369,37 +515,36 @@ function App() {
                   />
                 </div>
 
-                <div className="suggestions-list">
-                  {[
-                    { ext: '1012', name: 'Alice' },
-                    { ext: '1013', name: 'Bob' },
-                    { ext: '1014', name: 'Reception' }
-                  ].map(item => (
-                    <div
-                      key={item.ext}
-                      className={`suggestion-item ${transferTarget === item.ext ? 'selected' : ''}`}
-                      onClick={() => setTransferTarget(item.ext)}
-                    >
-                      <div className="suggestion-avatar">{item.name[0]}</div>
-                      <div className="suggestion-info">
-                        <div className="suggestion-name">{item.name}</div>
-                        <div className="suggestion-ext">{item.ext}</div>
-                      </div>
-                    </div>
-                  ))}
-                </div>
-
                 <div className="action-buttons">
                   <button className="btn btn-cancel" onClick={handleCancelTransfer}>Cancel</button>
-                  <button className="btn btn-transfer-confirm" onClick={handleTransferConfirm}>Transfer</button>
+                  <div className="transfer-options-container" style={{ flex: 2 }}>
+                    <div className="transfer-option-card" onClick={handleTransferConfirm}>
+                      <div className="option-icon blind"><BlindIcon /></div>
+                      <div className="option-text">
+                        <div className="option-label">Blind Transfer</div>
+                        <div className="option-desc">Immediate, one-way</div>
+                      </div>
+                    </div>
+                    <div className="transfer-option-card warm" onClick={() => {
+                      handleToggleHold();
+                      setDest(transferTarget);
+                      setIsTransferring(false);
+                    }}>
+                      <div className="option-icon warm"><WarmIcon /></div>
+                      <div className="option-text">
+                        <div className="option-label">Warm Transfer</div>
+                        <div className="option-desc">Consult first</div>
+                      </div>
+                    </div>
+                  </div>
                 </div>
               </div>
             )}
           </div>
 
           <div className="main-display">
-            <div className={`status-badge ${isRegistered ? 'status-online' : 'status-offline'}`}>
-              {status}
+            <div className={`status-badge ${!activeSession ? (isRegistered ? 'status-online' : 'status-offline') : (activeSession.isAnswered ? 'status-online' : 'badge-ringing')}`}>
+              {!activeSession ? status : (activeSession.isAnswered ? 'In Call' : 'Ringing')}
             </div>
 
             <div className="display-tabs">
@@ -410,55 +555,116 @@ function App() {
             </div>
 
             <div className="caller-info">
-              {callStatus === 'Idle' ? (
+              {!activeSession ? (
                 <>
                   <div className="caller-avatar-large">
                     <CloudIcon />
                   </div>
                   <div className="caller-name">System Ready</div>
                   <div className="caller-number">Initialize a conversation above</div>
+                  <a
+                    href="https://www.linkedin.com/in/sai-vishwanath-katkam-9b7507234"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="developer-tag"
+                    style={{
+                      fontSize: '15px',
+                      opacity: 0.8,
+                      marginTop: '16px',
+                      color: 'var(--secondary)',
+                      fontWeight: '600',
+                      textDecoration: 'none',
+                      display: 'inline-block',
+                      transition: 'all 0.2s'
+                    }}
+                  >
+                    --developed by vishwanath
+                  </a>
                 </>
               ) : (
                 <>
-                  <div className="caller-avatar-large">{dest[0] || '?'}</div>
-                  <div className="caller-name">{isIncoming ? 'Incoming Invitation' : 'Outgoing Request'}</div>
-                  <div className="caller-number">{dest}</div>
-                  <div className="call-timer">{formatDuration(duration)}</div>
+                  <div className="caller-avatar-large">{activeSession.number?.charAt(0) || '?'}</div>
+                  <div className="caller-name">
+                    {activeSession.isAnswered ? 'In call' : (activeSession.isIncoming ? 'Incoming call' : 'Calling...')}
+                  </div>
+                  <div className="caller-number">{activeSession.number}</div>
+                  {activeSession.isAnswered && <div className="call-timer">{formatDuration(activeSession.duration)}</div>}
                 </>
               )}
             </div>
 
-            {callStatus !== 'Idle' && (
+            {activeSession && (
               <div className="call-controls animate-in">
-                <button
-                  className={`control-btn ${isMuted ? 'active' : ''}`}
-                  onClick={isMuted ? handleunmute : handlemute}
-                  title={isMuted ? "Unmute" : "Mute"}
-                >
-                  {isMuted ? <MicOffIcon /> : <MicIcon />}
-                </button>
-                <button
-                  className={`control-btn ${isHeld ? 'active' : ''}`}
-                  onClick={handleToggleHold}
-                  title={isHeld ? "Unhold" : "Hold"}
-                >
-                  {isHeld ? <PlayIcon /> : <HoldIcon />}
-                </button>
-                <button
-                  className={`control-btn ${isTransferring ? 'active transfer-mode' : ''}`}
-                  onClick={handleToggleTransfer}
-                  title="Transfer Call"
-                >
-                  <TransferIcon />
-                </button>
-                <button className="control-btn"><KeypadIcon /></button>
-                <button className="control-btn end-call" onClick={handleHangup}><EndCallIcon /></button>
+                {activeSession.isAnswered ? (
+                  <>
+                    <button
+                      className={`control-btn ${activeSession.isMuted ? 'active' : ''}`}
+                      onClick={() => handleToggleMute()}
+                      title={activeSession.isMuted ? "Unmute" : "Mute"}
+                    >
+                      {activeSession.isMuted ? <MicOffIcon /> : <MicIcon />}
+                    </button>
+                    <button
+                      className={`control-btn ${activeSession.isHeld ? 'active' : ''}`}
+                      onClick={() => handleToggleHold()}
+                      title={activeSession.isHeld ? "Unhold" : "Hold"}
+                    >
+                      {activeSession.isHeld ? <PlayIcon /> : <HoldIcon />}
+                    </button>
+                    <button
+                      className={`control-btn ${isTransferring ? 'active transfer-mode' : ''}`}
+                      onClick={handleToggleTransfer}
+                      title="Transfer Call"
+                    >
+                      <BlindIcon />
+                    </button>
+
+                    {sessionCount === 2 && (
+                      <button
+                        className="control-btn attend-transfer"
+                        onClick={handleAttendTransfer}
+                        title="Complete Warm Transfer"
+                        style={{ background: 'var(--primary)', color: 'white' }}
+                      >
+                        <WarmIcon />
+                      </button>
+                    )}
+
+                    <button className="control-btn"><KeypadIcon /></button>
+                    <button className="btn btn-hangup-full" onClick={() => handleHangup()} style={{ width: '100%', padding: '16px' }}>
+                      <EndCallIcon /> Hangup
+                    </button>
+                  </>
+                ) : (
+                  <div style={{ display: 'flex', gap: '20px', width: '100%', maxWidth: '400px' }}>
+                    {activeSession.isIncoming ? (
+                      <>
+                        <button className="btn btn-answer" onClick={() => handleAnswer()}>
+                          <PhoneIcon /> Answer
+                        </button>
+                        <button className="btn btn-decline" onClick={() => handleDecline()}>
+                          <EndCallIcon /> Decline
+                        </button>
+                      </>
+                    ) : (
+                      <button className="btn btn-decline" style={{ width: '100%' }} onClick={() => handleHangup()}>
+                        <EndCallIcon /> Cancel Call
+                      </button>
+                    )}
+                  </div>
+                )}
               </div>
             )}
 
             {isTransferring && (
               <div className="transfer-banner animate-in">
-                Transferring to <b>{transferTarget || '...'}</b> — click Transfer to confirm
+                Transferring <b>{activeSession?.number}</b> to <b>{transferTarget || '...'}</b>
+              </div>
+            )}
+
+            {sessionCount === 2 && !isTransferring && (
+              <div className="transfer-banner animate-in" style={{ background: 'rgba(59, 130, 246, 0.1)', color: 'var(--primary)', border: '1px solid var(--primary)' }}>
+                Two calls active. Click the blue transfer icon to connect them.
               </div>
             )}
           </div>

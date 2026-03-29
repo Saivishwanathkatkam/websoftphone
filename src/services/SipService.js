@@ -6,7 +6,7 @@ console.log('SipService Version 1.1 Loaded');
 class SipService {
     constructor() {
         this.ua = null;
-        this.session = null;
+        this.sessions = new Map(); // Store sessions by their ID
         this.callbacks = {
             onRegistered: () => { },
             onUnregistered: () => { },
@@ -15,6 +15,7 @@ class SipService {
             onCallEnded: () => { },
             onCallConfirmed: () => { },
             onCallFailed: () => { },
+            onRemoteStream: () => { },
         };
     }
 
@@ -31,7 +32,7 @@ class SipService {
             uri: `sip:${user}@${host}`,
             password: password,
             display_name: displayName || user,
-            session_timers_expires: 600, // Correct key for JsSIP UA config
+            session_timers_expires: 600,
         };
 
         try {
@@ -47,19 +48,6 @@ class SipService {
                 this.callbacks.onUnregistered();
             });
 
-            this.ua.on('connecting', () => {
-                console.log('Transport connecting');
-            });
-            this.ua.on('connected', () => {
-                console.log('Transport connected');
-            });
-            this.ua.on('disconnected', () => {
-                console.log('Transport disconnected');
-            });
-            this.ua.on('failed', () => {
-                console.error('Transport connection failed');
-            });
-
             this.ua.on('registrationFailed', (e) => {
                 console.error('SIP Registration Failed:', e.cause);
                 this.callbacks.onRegistrationFailed(e.cause);
@@ -68,28 +56,28 @@ class SipService {
             this.ua.on('newRTCSession', (data) => {
                 console.log('New RTC Session');
                 const session = data.session;
+                this.sessions.set(session.id, session);
 
                 if (session.direction === 'incoming') {
                     console.log('Incoming call');
-                    this.session = session;
                     this.callbacks.onNewCall(session);
                 }
 
                 session.on('confirmed', () => {
-                    console.log('Call confirmed');
-                    this.callbacks.onCallConfirmed();
+                    console.log('Call confirmed', session.id);
+                    this.callbacks.onCallConfirmed(session);
                 });
 
                 session.on('ended', () => {
-                    console.log('Call ended');
-                    this.session = null;
-                    this.callbacks.onCallEnded();
+                    console.log('Call ended', session.id);
+                    this.sessions.delete(session.id);
+                    this.callbacks.onCallEnded(session);
                 });
 
                 session.on('failed', (e) => {
-                    console.error('Call failed:', e.cause);
-                    this.session = null;
-                    this.callbacks.onCallFailed(e.cause);
+                    console.error('Call failed:', e.cause, session.id);
+                    this.sessions.delete(session.id);
+                    this.callbacks.onCallFailed(session, e.cause);
                 });
 
                 const setupPC = (pc) => {
@@ -97,17 +85,9 @@ class SipService {
                     pc.addEventListener('track', (event) => {
                         console.log('Remote track event:', event.track.kind, event.streams);
                         if (event.streams && event.streams[0]) {
-                            this.callbacks.onRemoteStream(event.streams[0]);
+                            this.callbacks.onRemoteStream(session, event.streams[0]);
                         }
                     });
-                    /*
-                                        pc.addEventListener('connectionstatechange', () => {
-                                            console.log('PC Connection State:', pc.connectionState);
-                                        });
-                    
-                                        pc.addEventListener('iceconnectionstatechange', () => {
-                                            console.log('ICE Connection State:', pc.iceConnectionState);
-                                        });*/
                 };
 
                 if (session.connection) {
@@ -142,39 +122,26 @@ class SipService {
             }
         };
 
-        this.session = this.ua.call(`sip:${target}@${this.ua.configuration.uri.host}`, options);
+        const session = this.ua.call(`sip:${target}@${this.ua.configuration.uri.host}`, options);
+        this.sessions.set(session.id, session);
 
-        this.session.on('confirmed', () => {
-            this.callbacks.onCallConfirmed();
-        });
-
-        this.session.on('ended', () => {
-            this.callbacks.onCallEnded();
-        });
-
-        this.session.on('failed', (e) => {
-            this.callbacks.onCallFailed(e.cause);
-        });
-
-
-        return this.session;
+        // Events are handled in the 'newRTCSession' listener in start()
+        return session;
     }
 
-    terminateCall() {
-        if (this.session) {
+    terminateCall(session) {
+        if (session) {
             try {
-                this.session.terminate();
+                session.terminate();
             } catch (e) {
                 console.error("Error terminating session", e);
             }
-            this.session = null;
-            this.callbacks.onCallEnded(); // Force UI reset
         }
     }
 
-    answerCall() {
-        if (this.session && this.session.direction === 'incoming') {
-            this.session.answer({
+    answerCall(session) {
+        if (session && session.direction === 'incoming') {
+            session.answer({
                 mediaConstraints: { audio: true, video: false },
                 sessionTimersExpires: 600,
                 pcConfig: {
@@ -184,39 +151,47 @@ class SipService {
         }
     }
 
-    holdCall() {
-        if (this.session) {
-            this.session.hold();
+    holdCall(session) {
+        if (session) {
+            session.hold();
         }
     }
 
-    unholdCall() {
-        if (this.session) {
-            this.session.unhold();
+    unholdCall(session) {
+        if (session) {
+            session.unhold();
         }
     }
 
-    muteCall() {
-        if (this.session) {
-            this.session.mute({ audio: true });
+    muteCall(session) {
+        if (session) {
+            session.mute({ audio: true });
         }
     }
 
-    unmuteCall() {
-        if (this.session) {
-            this.session.unmute({ audio: true });
+    unmuteCall(session) {
+        if (session) {
+            session.unmute({ audio: true });
         }
     }
 
-    transferCall(target) {
-        if (this.session) {
+    transferCall(session, target) {
+        if (session) {
             console.log(`Transferring call to: ${target}`);
-            this.session.refer(target);
+            session.refer(target);
+        }
+    }
+
+    attendedTransfer(sessionToTransfer, sessionToReplace) {
+        if (sessionToTransfer && sessionToReplace) {
+            console.log(`Attended transfer: ${sessionToTransfer.id} to ${sessionToReplace.id}`);
+            // In Attended Transfer, we refer the held session to the target of the active session
+            // and we state that it "replaces" the active session.
+            const target = sessionToReplace.remote_identity.uri.toString();
+            sessionToTransfer.refer(target, { replaces: sessionToReplace });
         }
     }
 }
 
 const sipService = new SipService();
-const sipService2 = new sipService();
 export default sipService;
-export default sipService2;
