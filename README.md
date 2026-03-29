@@ -15,7 +15,7 @@ A modern, responsive WebRTC softphone built with React and JsSIP. This applicati
 ## Features
 
 - **Call Handling** — Make and receive SIP calls directly from the browser.
-- **Dual Call Management** — Handle up to 2 simultaneous active calls.
+- **Dual Call Management** — Handles simultaneous active calls.
 - **Call Controls:**
   - Hold / Unhold
   - Mute / Unmute
@@ -169,7 +169,6 @@ session.refer();     // Execute call transfer
 ## Known Limitations
 
 - WSS (Secure WebSocket) is not yet implemented.
-- Maximum of 2 simultaneous calls supported.
 - No video call support.
 
 ---
